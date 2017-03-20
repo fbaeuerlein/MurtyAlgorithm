@@ -1,8 +1,15 @@
 /*
- * AssociationFinderMiller.h
+ * MurtyMiller.h
  *
  *  Created on: 15.08.2013
  *      Author: fb
+ *
+ * Murty's algorithm implementation according to
+ * Miller's pseudo-code formulation in "Optimizing Murty's ranked assignment method"
+ *
+ * Miller, M.L.; Stone, H.S.; Cox, Ingemar J., "Optimizing Murty's ranked assignment method,"
+ * Aerospace and Electronic Systems, IEEE Transactions on , vol.33, no.3, pp.851,862, July 1997
+ * doi: 10.1109/7.599256
  */
 
 #ifndef MILLER_H_
@@ -13,15 +20,18 @@
 
 
 template<typename Scalar = double>
-class AssociationFinderMiller {
+class MurtyMiller
+{
 public:
 
     typedef Eigen::Matrix<Scalar, -1, -1> WeightMatrix;
     typedef Eigen::Matrix<size_t, -1, -1> AssignmentMatrix;
+    typedef typename Auction<Scalar>::Edge Edge;
+    typedef typename Auction<Scalar>::Edges Edges;
 
     /**
-     * a partition represents an assignment matrix with it's
-     * weight matrix
+     * a partition represents an assignment matrix (i.e. edges)
+     * with it's weight matrix
      * see Murty's algorithm for details
      */
     class Partition
@@ -33,7 +43,7 @@ public:
         }
 
         Partition(const Edges & edges, const WeightMatrix & w, const Scalar v) :
-        edges(edges), w(w), value(v)
+            edges(edges), w(w), value(v)
         {}
 
         Edges edges;
@@ -43,10 +53,10 @@ public:
 
     struct ComparePartition: std::binary_function<Partition,Partition,bool>
     {
-      bool operator()(const Partition & lhs, const Partition & rhs) const
-      {
-          return ( lhs.value < rhs.value );
-      }
+        bool operator()(const Partition & lhs, const Partition & rhs) const
+        {
+            return ( lhs.value < rhs.value );
+        }
     };
 
     /**
@@ -59,78 +69,57 @@ public:
      * @param edges
      * @return
      */
-    static Scalar objectiveFunctionValue(const Edges & edges, const size_t toX, const size_t toY )
+    static Scalar objectiveFunctionValue(const Edges & edges )
     {
         Scalar v = 0;
-        for ( auto & e : edges )
-        {
-            if ( e.y < toY)
-                v += e.v;
-        }
+        for ( const auto & e : edges )
+            v += e.v;
+
         return v;
     }
 
-    static void edgesToAssignmentMatrix(AssignmentMatrix & m, const Edges & edges)
-    {
-        for(auto & e : edges )
-            m(e.x, e.y) = 1;
-    }
-
-    static typename std::vector<Edges>  buildMBestAssignmentsAuction(const WeightMatrix & w, const size_t toX, const size_t toY, const size_t mBest = 5, const APSolvingMode mode = MAXIMIZATION)
+    static typename std::vector<Edges> getMBestAssignments(const WeightMatrix & w,  const size_t mBest = 5 )
     {
         const size_t rows = w.rows(), cols = w.cols();
 
         assert( rows != 0 && cols != 0 && cols >= rows );
-
-        WeightMatrix m = w;
 
         typename std::vector<Edges> resultingEdges;
 
         // special case if rows = cols = 1
         if ( cols == 1 && rows == 1 )
         {
-            if (m(0, 0) == 0 ) return resultingEdges;
+            if (w(0, 0) == 0 ) return resultingEdges;
 
             Edges edges;
-            edges.push_back(Edge<Scalar>(0, 0, m(0, 0)));
-            resultingEdges.push_back(edges);
+            edges.emplace_back(Edge(0, 0, w(0, 0)));
+            resultingEdges.emplace_back(edges);
             return resultingEdges;
         }
 
         size_t kBest = 0;
 
-        const size_t maxComb = ( m.rows() > m.cols() ) ? m.rows() : m.cols();
+        const size_t maxComb = ( rows > cols ) ? rows : cols;
         // if rows! < mBest ...
         switch (maxComb)
         {
-            case 1 : kBest = 1; break;
-            case 2 : kBest = 2; break;
-            case 3 : kBest = 6; break;
-            case 4 : kBest = 24; break;
-            default: kBest = mBest; break;
+        case 1 : kBest = 1; break;
+        case 2 : kBest = 2; break;
+        case 3 : kBest = 6; break;
+        case 4 : kBest = 24; break;
+        default: kBest = mBest; break;
         }
         if ( mBest < kBest ) kBest = mBest;
 
-#ifdef __ASSOCIATON_FINDER_DEBUG
-        std::cout << "try to solve: \n" << m << std::endl;
-#endif
-        Edges edges = Auction<Scalar>::solve(m); // make initial (best) assignment
+        std::cout << "kBest = " << kBest << std::endl;
+
+        Edges edges = Auction<Scalar>::solve(w); // make initial (best) assignment
 
         // sort edges by row
-        std::sort(edges.begin(), edges.end(), [](const Edge<Scalar> & e1, const Edge<Scalar> & e2) {return e1.x < e2.x;});
+        std::sort(edges.begin(), edges.end(), [](const Edge & e1, const Edge & e2) {return e1.x < e2.x;});
 
         // initial partition, i.e. best solution
-        Partition init(edges, m, objectiveFunctionValue(edges, toX, toY));
-
-#ifdef __ASSOCIATON_FINDER_DEBUG
-        {
-            AssignmentMatrix a = AssignmentMatrix::Zero(m.rows(), m.cols());
-            edgesToAssignmentMatrix(a, edges);
-
-            std::cout << "generated initial assignment with value " << init.value
-            << " and matrix =\n" << a << std::endl;
-        }
-#endif
+        Partition init(edges, w, objectiveFunctionValue(edges));
 
         typedef std::priority_queue<Partition, std::vector<Partition>, ComparePartition > PartitionsPriorityQueue;
 
@@ -154,65 +143,54 @@ public:
             {
                 auto & triplet = currentPartition.edges[e];
 
-                // omit invalid triplets
-                if ( triplet.y >= toY ) continue;
-
                 WeightMatrix P_ = currentPartition.w; // P' = P
 
                 // exclude edge by setting weight in matrix to lockingValue -> NOT (x, y)
                 P_(triplet.x, triplet.y) = lockingValue;
 
-#ifdef __ASSOCIATON_FINDER_DEBUG
-                for (auto & t : currentPartition.edges)
-                {
-                    if ( t.x == triplet.x && t.y == triplet.y )
-                    std::cout << "NOT ";
-                    std::cout << "(" << t.x << ", " << t.y << ") ";
-                }
-                std::cout << std::endl;
-                std::cout << P_ << std::endl;
-#endif
-
                 // determine solution for changed matrix and create partition
                 Edges S_ = Auction<Scalar>::solve(P_);
 
-                if (S_.size() == P_.rows())// solution found?
+#ifdef __ASSOCIATON_FINDER_DEBUG
+                for (const auto & t : currentPartition.edges)
+                {
+                    if ( t.x == triplet.x && t.y == triplet.y )
+                        std::cout << "NOT ";
+                    std::cout << "(" << t.x << ", " << t.y << ") ";
+                }
+                std::cout << "sum = " << objectiveFunctionValue(S_) << std::endl;
+#endif
+
+                if (S_.size() == P_.rows())// solution found? (rows >= cols!)
                 {
                     // sort edges by row
-                    std::sort(S_.begin(), S_.end(), [](const Edge<Scalar> & e1, const Edge<Scalar> & e2) {return e1.x < e2.x;});
+                    std::sort(S_.begin(), S_.end(), [](const Edge & e1, const Edge & e2) {return e1.x < e2.x;});
 
-                    Partition newPartition(S_, P_, objectiveFunctionValue(S_, toX, toY));
+                    priorityQueue.emplace(Partition(S_, P_, objectiveFunctionValue(S_)));
 
-                    // if S exists
-                    priorityQueue.push(newPartition);// push back unpartitioned new partition
                 }
                 // remove all vertices that include row and column of current node
                 // i.e. force using this edge
-                for (size_t r = 0; r < currentPartition.w.rows(); ++r )
+                for (size_t r = 0; r < rows; ++r )
                     currentPartition.w(r, triplet.y) = lockingValue;
 
-                for (size_t c = 0; c < currentPartition.w.cols(); ++c )
+                for (size_t c = 0; c < cols; ++c )
                     currentPartition.w(triplet.x, c) = lockingValue;
 
                 // set edge back to original value
-                currentPartition.w(triplet.x, triplet.y) = triplet.v = m(triplet.x, triplet.y);
-
-#ifdef __ASSOCIATON_FINDER_DEBUG
-                std::cout << "setting (" << triplet.x << ", " << triplet.y << ") back to " << triplet.v << std::endl;
-#endif
+                currentPartition.w(triplet.x, triplet.y) = triplet.v = w(triplet.x, triplet.y);
+            }
+        }
+            // create return list
+            while( !answerList.empty() )
+            {
+                resultingEdges.emplace_back(answerList.top().edges);
+                answerList.pop();
             }
 
+            return resultingEdges;
         }
+};
 
-        // create return list
-        while( !answerList.empty() )
-        {
-            resultingEdges.push_back(answerList.top().edges);
-            answerList.pop();
-        }
 
-        return resultingEdges;
-    }
-
-};}
 #endif
